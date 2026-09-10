@@ -148,6 +148,27 @@ test('provider keys migrate once and remain isolated across switches',()=>{
   assert.equal(readProviderSettings(storage,'gemini').apiKey,'FAKE_GOOGLE_KEY');
   assert.equal(values.has('loresieve_custom_api_key'),false);
 });
+test('a blank saved model falls back to the provider default instead of sticking',()=>{
+  // An empty stored model is a cleared field, not a choice. Keeping it (as
+  // `??` did) pinned the UI to manual entry with no way back to the dropdown.
+  for(const blank of ['','   ']){
+    const values=new Map([['loresieve_selected_provider','openrouter'],['loresieve_openrouter_model',blank]]);
+    const storage={getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};
+    assert.equal(readProviderSettings(storage,'openrouter').model,DEFAULT_OPENROUTER_MODEL);
+    // and the repaired value is written back, so it self-heals permanently
+    assert.equal(values.get('loresieve_openrouter_model'),DEFAULT_OPENROUTER_MODEL);
+  }
+  const blankLegacy=new Map([['loresieve_selected_provider','openrouter'],['loresieve_selected_model','']]);
+  const storage={getItem:k=>blankLegacy.get(k)??null,setItem:(k,v)=>blankLegacy.set(k,v),removeItem:k=>blankLegacy.delete(k)};
+  assert.equal(readProviderSettings(storage,'openrouter').model,DEFAULT_OPENROUTER_MODEL);
+  // a real saved pick is still honoured, and custom stays free-form
+  const kept=new Map([['loresieve_openrouter_model','anthropic/claude-opus-4.6']]);
+  const keptStorage={getItem:k=>kept.get(k)??null,setItem:(k,v)=>kept.set(k,v),removeItem:k=>kept.delete(k)};
+  assert.equal(readProviderSettings(keptStorage,'openrouter').model,'anthropic/claude-opus-4.6');
+  const customValues=new Map();
+  const customStorage={getItem:k=>customValues.get(k)??null,setItem:(k,v)=>customValues.set(k,v),removeItem:k=>customValues.delete(k)};
+  assert.equal(readProviderSettings(customStorage,'custom').model,'');
+});
 function chunk(type,data){const out=Buffer.alloc(data.length+12);out.writeUInt32BE(data.length);out.write(type,4);data.copy(out,8);return out;}
 function png(chunks){const value=Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]),...chunks,chunk('IEND',Buffer.alloc(0))]);return value.buffer.slice(value.byteOffset,value.byteOffset+value.length);}
 const metadata=Buffer.from(JSON.stringify({data:{name:'岳悦',description:'A complete character description.'}})).toString('base64');

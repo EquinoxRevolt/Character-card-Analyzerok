@@ -8,6 +8,13 @@ export const PROVIDERS = [
   { id: "custom", label: "Custom", defaultModel: "" },
 ];
 
+// A stored model of "" is not a choice — it's a cleared field. `??` would
+// keep it (it only falls through on null), which permanently pins the
+// provider to an empty model and, in the UI, to the manual-entry box.
+function firstMeaningful(...values: Array<string | null | undefined>): string {
+  return values.find(value => value && value.trim())?.trim() ?? "";
+}
+
 export function readProviderSettings(storage: Pick<Storage, "getItem" | "setItem" | "removeItem">, provider: string) {
   const definition = PROVIDERS.find(p => p.id === provider) || PROVIDERS[0];
   // The legacy key belongs only to the provider selected when upgrading.
@@ -16,7 +23,7 @@ export function readProviderSettings(storage: Pick<Storage, "getItem" | "setItem
   const legacyKey = provider === legacyOwner ? storage.getItem("loresieve_custom_api_key") : null;
   const key = storage.getItem(prefix + "api_key") ?? legacyKey ?? "";
   const oldModel = provider === legacyOwner ? storage.getItem("loresieve_selected_model") : null;
-  const model = migrateModel(provider, storage.getItem(prefix + "model") ?? oldModel ?? definition.defaultModel);
+  const model = migrateModel(provider, firstMeaningful(storage.getItem(prefix + "model"), oldModel, definition.defaultModel));
   const baseUrl = storage.getItem(prefix + "base_url") ?? (provider === "custom" ? storage.getItem("loresieve_custom_base_url") : null) ?? "";
   storage.setItem(prefix + "api_key", key);
   storage.setItem(prefix + "model", model);

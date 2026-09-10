@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { OPENROUTER_MODELS, DEFAULT_GEMINI_MODEL } from "../data/models";
+import { useEffect, useState } from "react";
+import { OPENROUTER_MODELS, DEFAULT_GEMINI_MODEL, DEFAULT_OPENROUTER_MODEL } from "../data/models";
 import { PROVIDERS, readProviderSettings } from "../providerSettings";
 import { fetchDeepSeekModels } from "../aiClient";
 
@@ -34,6 +34,7 @@ export function useModelSettings() {
     localStorage.setItem("loresieve_selected_provider", next);
     setProviderState(next);
     setDetails(loaded);
+    return loaded;
   };
   const update = (field: "apiKey" | "model" | "baseUrl", suffix: string, value: string) => {
     localStorage.setItem(`loresieve_${provider}_${suffix}`, value);
@@ -79,6 +80,18 @@ export default function ModelSettingsPanel({ s }: { s: ModelSettings }) {
   const [deepseekModels, setDeepseekModels] = useState<string[]>(readCachedDeepSeekModels);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [fetchStatus, setFetchStatus] = useState("");
+
+  // In list mode the dropdown can only display a value it actually has an
+  // option for, so pull an unrecognized or empty model onto a real option
+  // instead of showing a control whose value doesn't match what gets sent.
+  useEffect(() => {
+    if (isManualModel) return;
+    if (s.provider === "openrouter" && !OPENROUTER_MODELS.some(m => m.id === s.model)) {
+      s.setModel(DEFAULT_OPENROUTER_MODEL);
+    } else if (s.provider === "deepseek" && deepseekModels.length > 0 && !deepseekModels.includes(s.model)) {
+      s.setModel(deepseekModels.includes("deepseek-chat") ? "deepseek-chat" : deepseekModels[0]);
+    }
+  }, [isManualModel, s.provider, s.model, deepseekModels]);
 
   const handleFetchModels = async () => {
     setFetchingModels(true);
@@ -151,8 +164,14 @@ export default function ModelSettingsPanel({ s }: { s: ModelSettings }) {
                   key={p.id}
                   type="button"
                   onClick={() => {
-                    s.setProvider(p.id);
-                    setIsManualModel(false);
+                    const loaded = s.setProvider(p.id);
+                    // Only land in manual entry if the newly loaded model
+                    // really is a hand-typed ID this provider can't list.
+                    setIsManualModel(
+                      p.id === "openrouter" ? !OPENROUTER_MODELS.some(m => m.id === loaded.model)
+                      : p.id === "deepseek" ? deepseekModels.length > 0 && !deepseekModels.includes(loaded.model)
+                      : false
+                    );
                   }}
                   className={`min-w-0 whitespace-normal break-words py-2 px-2 rounded text-[10px] font-mono text-center font-bold tracking-wide uppercase border transition-colors ${
                     s.provider === p.id
@@ -268,7 +287,7 @@ export default function ModelSettingsPanel({ s }: { s: ModelSettings }) {
                 </label>
               </div>
 
-              {isManualModel || !OPENROUTER_MODELS.some(m => m.id === s.model) ? (
+              {isManualModel ? (
                 <input
                   type="text"
                   value={s.model}
@@ -279,7 +298,7 @@ export default function ModelSettingsPanel({ s }: { s: ModelSettings }) {
               ) : (
                 <div className="relative">
                   <select
-                    value={s.model}
+                    value={OPENROUTER_MODELS.some(m => m.id === s.model) ? s.model : DEFAULT_OPENROUTER_MODEL}
                     onChange={(e) => s.setModel(e.target.value)}
                     className="w-full bg-[#0A0A0A] border border-[#1A1A1A] rounded p-2 text-xs font-mono text-zinc-200 appearance-none focus:outline-none focus:border-[#00F0FF]/60 cursor-pointer"
                   >
@@ -315,7 +334,7 @@ export default function ModelSettingsPanel({ s }: { s: ModelSettings }) {
                 )}
               </div>
 
-              {isManualModel || !deepseekModels.includes(s.model) ? (
+              {isManualModel || deepseekModels.length === 0 ? (
                 <input
                   type="text"
                   value={s.model}
@@ -326,7 +345,7 @@ export default function ModelSettingsPanel({ s }: { s: ModelSettings }) {
               ) : (
                 <div className="relative">
                   <select
-                    value={s.model}
+                    value={deepseekModels.includes(s.model) ? s.model : deepseekModels[0]}
                     onChange={(e) => s.setModel(e.target.value)}
                     className="w-full bg-[#0A0A0A] border border-[#1A1A1A] rounded p-2 text-xs font-mono text-zinc-200 appearance-none focus:outline-none focus:border-[#00F0FF]/60 cursor-pointer"
                   >

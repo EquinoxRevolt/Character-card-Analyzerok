@@ -349,3 +349,7 @@ export function runMultichar(
   return run("multichar", userText, [], cfg);
 }
 
+// Stub required by ModelSettings.tsx in the updated repository version
+export async function fetchDeepSeekModels(): Promise<string[]> {
+  return [];
+}

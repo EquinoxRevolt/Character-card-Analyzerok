@@ -11,7 +11,6 @@ import ReviewStats from "./components/ReviewStats";
 import Observations from "./components/Observations";
 import VisualMatch from "./components/VisualMatch";
 import ExportButtons from "./components/ExportButtons";
-import ReportOutputButton from "./components/ReportOutputButton";
 import ImmersionSections from "./components/ImmersionSections";
 import { AnalysisResult, ComparisonResult, GroupResult, MultiCharResult } from "./types";
 import { runAnalyze, runCompare, runGroup, runMultichar } from "./aiClient";
@@ -394,7 +393,6 @@ export default function App() {
                       className="space-y-6"
                     >
                       <div className="flex justify-end gap-2 mb-2">
-                        <ReportOutputButton mode="audit" />
                         <ExportButtons data={analysis} type="audit" charName={extractedName} />
                       </div>
                       {/* HERO SCORE CARD: SLOP RATING */}
@@ -695,7 +693,6 @@ export default function App() {
                       className="mt-6"
                     >
                       <div className="flex justify-end gap-2 mb-4">
-                        <ReportOutputButton mode="comparison" />
                         <ExportButtons data={comparisonResult} type="comparison" />
                       </div>
                       <ComparisonView comparisonData={comparisonResult} />
@@ -785,7 +782,6 @@ export default function App() {
                       className="mt-6"
                     >
                       <div className="flex justify-end gap-2 mb-4">
-                        <ReportOutputButton mode="group" />
                         <ExportButtons data={groupResult} type="group" />
                       </div>
                       <GroupView data={groupResult} />
@@ -857,7 +853,6 @@ export default function App() {
                       className="space-y-6"
                     >
                       <div className="flex justify-end gap-2 mb-2">
-                        <ReportOutputButton mode="multichar" />
                         <ExportButtons data={multiCharResult} type="multichar" />
                       </div>
                       <MultiCharView data={multiCharResult} />

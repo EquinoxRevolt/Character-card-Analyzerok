@@ -1,8 +1,10 @@
 import { Flag } from "lucide-react";
 
-// Where "Report Output" emails are sent. Change this to your own address
-// before publishing under a different owner.
-const REPORT_EMAIL = "[redacted-personal-email]";
+// Where "Report Output" emails are sent. This ships in the public bundle and
+// in the public repo's source, so it must never be a personal address — use
+// a dedicated project/support address. Left blank until one is set: the
+// button hides itself rather than risk shipping someone's personal inbox.
+const REPORT_EMAIL = "";
 
 interface ReportOutputButtonProps {
   mode: "audit" | "comparison" | "group" | "multichar";
@@ -12,6 +14,7 @@ interface ReportOutputButtonProps {
 // Google Play's AI-Generated Content policy. Opens the user's mail app with
 // a prefilled report — no backend needed.
 export default function ReportOutputButton({ mode }: ReportOutputButtonProps) {
+  if (!REPORT_EMAIL) return null;
   const subject = encodeURIComponent(`[Character Card Analyzer] Report AI output (${mode} mode)`);
   const body = encodeURIComponent(
     "What was wrong with the AI's output? (offensive, unsafe, broken, etc.)\n\n\n" +

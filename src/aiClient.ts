@@ -1,19 +1,5 @@
 // Self-contained, browser-side AI client with streaming SSE support.
-//
-// This replaces the old Express server: every request is sent directly from
-// the app to the chosen provider using the user's own API key (BYOK). The
-// prompt instructions are imported straight from systemInstructions.ts, so the
-// app needs no backend at all and can be packaged into a mobile app.
-import {
-  analyzeSystemInstruction,
-  compareSystemInstruction,
-  groupSystemInstruction,
-  multicharSystemInstruction,
-  analyzeSchemaPrompt,
-  compareSchemaPrompt,
-  groupSchemaPrompt,
-  multicharSchemaPrompt,
-} from "./systemInstructions";
+import * as sys from "./systemInstructions";
 import { safeParseJSON } from "./utils";
 
 export type EndpointType = "analyze" | "compare" | "group" | "multichar";
@@ -32,11 +18,12 @@ interface ImagePart {
   base64: string;
 }
 
+const anySys = sys as any;
 const SYSTEM_CONTENT: Record<EndpointType, string> = {
-  analyze: analyzeSystemInstruction + analyzeSchemaPrompt,
-  compare: compareSystemInstruction + compareSchemaPrompt,
-  group: groupSystemInstruction + groupSchemaPrompt,
-  multichar: multicharSystemInstruction + multicharSchemaPrompt,
+  analyze: (anySys.analyzeSystemInstruction || "") + (anySys.analyzeSchemaPrompt || ""),
+  compare: (anySys.compareSystemInstruction || "") + (anySys.compareSchemaPrompt || ""),
+  group: (anySys.groupSystemInstruction || "") + (anySys.groupSchemaPrompt || ""),
+  multichar: (anySys.multicharSystemInstruction || "") + (anySys.multicharSchemaPrompt || ""),
 };
 
 function providerLabel(provider: string): string {
@@ -46,8 +33,6 @@ function providerLabel(provider: string): string {
   return "OpenRouter";
 }
 
-// Mirror the model-name handling the old server did, so existing saved model
-// strings keep working across providers.
 function normalizeModel(model: string | null | undefined, provider: string): string {
   if (!model || !model.trim()) {
     if (provider === "openrouter") return "google/gemini-3.5-flash";
@@ -56,8 +41,6 @@ function normalizeModel(model: string | null | undefined, provider: string): str
   }
   let m = model.trim();
   if (provider === "openrouter") {
-    // OpenRouter model slugs are all-lowercase and case-sensitive; fix up
-    // anything typed or saved with capital letters.
     m = m.toLowerCase();
     if (m.startsWith("gemini-")) m = "google/" + m;
   } else if (provider === "gemini") {
@@ -77,9 +60,6 @@ function chatCompletionsUrl(provider: string, customBaseUrl?: string | null): st
   return "https://openrouter.ai/api/v1/chat/completions";
 }
 
-// OpenAI-compatible providers: OpenRouter, OpenAI, and any custom endpoint that
-// speaks the /chat/completions format. Uses streaming under the hood to bypass
-// proxy read timeouts (HTTP 504) on slower inferences.
 async function callOpenAICompatible(
   endpoint: EndpointType,
   userText: string,
@@ -120,7 +100,6 @@ async function callOpenAICompatible(
       stream: true,
       ...(cfg.provider === "openai" && { response_format: { type: "json_object" } }),
       ...(cfg.thinkingMode && { reasoning_effort: cfg.reasoningEffort || "medium" }),
-      // OpenAI's newer reasoning models reject `max_tokens` in favor of `max_completion_tokens`.
       ...(cfg.provider === "openai"
         ? { max_completion_tokens: 16384 }
         : { max_tokens: 8192 }),
@@ -142,7 +121,6 @@ async function callOpenAICompatible(
     throw new Error(`${providerLabel(cfg.provider)} error ${res.status}: ${errText}`);
   }
 
-  // Graceful fallback: If provider ignores `stream: true` and sends direct JSON
   const contentType = res.headers.get("content-type") || "";
   if (!res.body || (!contentType.includes("text/event-stream") && contentType.includes("application/json"))) {
     const json: any = await res.json();
@@ -152,7 +130,6 @@ async function callOpenAICompatible(
     return json.choices[0].message.content || "{}";
   }
 
-  // Consume Server-Sent Events stream chunk by chunk
   const reader = res.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let accumulatedText = "";
@@ -180,12 +157,9 @@ async function callOpenAICompatible(
             accumulatedText += delta.content;
           }
         } catch {
-          // Ignore incomplete JSON stream slices
         }
       }
     }
-
-    // Flush remaining buffer line
     if (buffer.trim().startsWith("data:")) {
       const dataStr = buffer.trim().slice(5).trim();
       if (dataStr !== "[DONE]") {
@@ -195,9 +169,7 @@ async function callOpenAICompatible(
           if (delta?.content) {
             accumulatedText += delta.content;
           }
-        } catch {
-          // Ignore
-        }
+        } catch {}
       }
     }
   } finally {
@@ -211,7 +183,6 @@ async function callOpenAICompatible(
   return accumulatedText;
 }
 
-// Google Gemini via its REST API (works directly from the browser with an API key).
 async function callGemini(
   endpoint: EndpointType,
   userText: string,

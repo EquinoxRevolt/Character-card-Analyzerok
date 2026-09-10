@@ -1,49 +1,46 @@
-// Self-contained, browser-side AI client.
+// Self-contained, browser-side AI client with streaming SSE support.
 //
 // This replaces the old Express server: every request is sent directly from
 // the app to the chosen provider using the user's own API key (BYOK). The
 // prompt instructions are imported straight from systemInstructions.ts, so the
 // app needs no backend at all and can be packaged into a mobile app.
-import { buildPrompt } from "./systemInstructions";
-import type { ImmersionModuleId } from "./immersionModules";
+import {
+  analyzeSystemInstruction,
+  compareSystemInstruction,
+  groupSystemInstruction,
+  multicharSystemInstruction,
+  analyzeSchemaPrompt,
+  compareSchemaPrompt,
+  groupSchemaPrompt,
+  multicharSchemaPrompt,
+} from "./systemInstructions";
 import { safeParseJSON } from "./utils";
-import { normalizeResult } from "./resultValidation";
-import { DEFAULT_GEMINI_MODEL, DEFAULT_OPENROUTER_MODEL, selectLatestModel } from "./data/models";
 
 export type EndpointType = "analyze" | "compare" | "group" | "multichar";
 
 export interface RunnerConfig {
-  provider: string; // "gemini" | "openrouter" | "openai" | "deepseek" | "custom"
+  provider: string; // "gemini" | "openrouter" | "openai" | "custom"
   apiKey: string;
   model: string | null;
   customBaseUrl?: string | null;
   thinkingMode?: boolean;
   reasoningEffort?: string;
-  // User-selected optional immersion modules; only these are requested from
-  // the model (the schema is assembled per request), so unchecked modules
-  // cost zero output tokens.
-  modules?: ImmersionModuleId[];
-  maxOutputTokens?: number;
-  // "Token-Efficient Grading": send the condensed rubric instead of the full one.
-  efficientGrading?: boolean;
 }
-
-interface ProviderReply { text: string; model: string; }
 
 interface ImagePart {
   mimeType: string;
   base64: string;
 }
 
-// The system prompt is assembled per request so it only demands the immersion
-// modules the user actually enabled.
-function systemContent(endpoint: EndpointType, cfg: RunnerConfig): string {
-  return buildPrompt(endpoint, cfg.modules ?? [], cfg.efficientGrading ?? false);
-}
+const SYSTEM_CONTENT: Record<EndpointType, string> = {
+  analyze: analyzeSystemInstruction + analyzeSchemaPrompt,
+  compare: compareSystemInstruction + compareSchemaPrompt,
+  group: groupSystemInstruction + groupSchemaPrompt,
+  multichar: multicharSystemInstruction + multicharSchemaPrompt,
+};
 
 function providerLabel(provider: string): string {
   if (provider === "openai") return "OpenAI";
-  if (provider === "deepseek") return "DeepSeek";
   if (provider === "custom") return "the custom endpoint";
   if (provider === "gemini") return "Gemini";
   return "OpenRouter";
@@ -53,10 +50,9 @@ function providerLabel(provider: string): string {
 // strings keep working across providers.
 function normalizeModel(model: string | null | undefined, provider: string): string {
   if (!model || !model.trim()) {
-    if (provider === "openrouter") return DEFAULT_OPENROUTER_MODEL;
+    if (provider === "openrouter") return "google/gemini-3.5-flash";
     if (provider === "openai") return "gpt-5.5";
-    if (provider === "deepseek") return "deepseek-chat";
-    return DEFAULT_GEMINI_MODEL;
+    return "gemini-3.5-flash";
   }
   let m = model.trim();
   if (provider === "openrouter") {
@@ -66,37 +62,30 @@ function normalizeModel(model: string | null | undefined, provider: string): str
     if (m.startsWith("gemini-")) m = "google/" + m;
   } else if (provider === "gemini") {
     m = m.replace(/^google\//i, "");
-  } else if (provider === "deepseek") {
-    // Direct DeepSeek IDs have no vendor prefix, unlike OpenRouter slugs.
-    m = m.replace(/^deepseek\/(?=deepseek)/i, "");
   }
   return m;
 }
 
 function chatCompletionsUrl(provider: string, customBaseUrl?: string | null): string {
-  if (provider === "custom") {
-    if (!customBaseUrl?.trim()) throw new Error("Enter the custom endpoint URL before running an analysis.");
-    let parsed: URL;
-    try { parsed = new URL(customBaseUrl.trim()); } catch { throw new Error("Enter a valid http:// or https:// custom endpoint URL."); }
-    if (!["https:", "http:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
-      throw new Error("Use an http:// or https:// endpoint URL without credentials, query parameters, or a fragment.");
-    }
-    const base = parsed.href.replace(/\/+$/, "");
-    return base.endsWith("/chat/completions") ? base : base + "/chat/completions";
+  if (provider === "custom" && customBaseUrl && customBaseUrl.trim()) {
+    const base = customBaseUrl.trim();
+    return base.endsWith("/chat/completions")
+      ? base
+      : base.replace(/\/+$/, "") + "/chat/completions";
   }
   if (provider === "openai") return "https://api.openai.com/v1/chat/completions";
-  if (provider === "deepseek") return "https://api.deepseek.com/chat/completions";
   return "https://openrouter.ai/api/v1/chat/completions";
 }
 
 // OpenAI-compatible providers: OpenRouter, OpenAI, and any custom endpoint that
-// speaks the /chat/completions format.
+// speaks the /chat/completions format. Uses streaming under the hood to bypass
+// proxy read timeouts (HTTP 504) on slower inferences.
 async function callOpenAICompatible(
   endpoint: EndpointType,
   userText: string,
   images: ImagePart[],
   cfg: RunnerConfig
-): Promise<ProviderReply> {
+): Promise<string> {
   const url = chatCompletionsUrl(cfg.provider, cfg.customBaseUrl);
 
   const userContent: any = images.length
@@ -125,22 +114,16 @@ async function callOpenAICompatible(
     body: JSON.stringify({
       model: normalizeModel(cfg.model, cfg.provider),
       messages: [
-        { role: "system", content: systemContent(endpoint, cfg) },
+        { role: "system", content: SYSTEM_CONTENT[endpoint] },
         { role: "user", content: userContent },
       ],
+      stream: true,
       ...(cfg.provider === "openai" && { response_format: { type: "json_object" } }),
-      // DeepSeek has no reasoning-effort knob (thinking is chosen by picking
-      // deepseek-reasoner as the model) and gets no response_format, which its
-      // reasoner rejects; safeParseJSON handles the plain-text reply.
-      ...(cfg.thinkingMode && cfg.provider !== "deepseek" && (cfg.provider === "openrouter"
-        ? { reasoning: { effort: cfg.reasoningEffort || "medium", exclude: true } }
-        : { reasoning_effort: cfg.reasoningEffort || "medium" })),
-      // OpenAI's newer (reasoning) models reject the legacy `max_tokens` field
-      // and require `max_completion_tokens` instead. Reasoning tokens also
-      // count against this budget, so give OpenAI more headroom.
+      ...(cfg.thinkingMode && { reasoning_effort: cfg.reasoningEffort || "medium" }),
+      // OpenAI's newer reasoning models reject `max_tokens` in favor of `max_completion_tokens`.
       ...(cfg.provider === "openai"
-        ? { max_completion_tokens: cfg.maxOutputTokens }
-        : { max_tokens: cfg.maxOutputTokens }),
+        ? { max_completion_tokens: 16384 }
+        : { max_tokens: 8192 }),
     }),
   });
 
@@ -152,21 +135,80 @@ async function callOpenAICompatible(
       );
     }
     if (res.status === 401) {
-      throw new Error(`Authorization failed (401). Check that your ${providerLabel(cfg.provider)} API key is correct.`);
+      throw new Error(
+        `Authorization failed (401). Check that your ${providerLabel(cfg.provider)} API key is correct.`
+      );
     }
     throw new Error(`${providerLabel(cfg.provider)} error ${res.status}: ${errText}`);
   }
 
-  const json: any = await res.json();
-  if (!json.choices?.[0]?.message) {
+  // Graceful fallback: If provider ignores `stream: true` and sends direct JSON
+  const contentType = res.headers.get("content-type") || "";
+  if (!res.body || (!contentType.includes("text/event-stream") && contentType.includes("application/json"))) {
+    const json: any = await res.json();
+    if (!json.choices?.[0]?.message) {
+      throw new Error("The provider returned no usable output. Try again or switch models.");
+    }
+    return json.choices[0].message.content || "{}";
+  }
+
+  // Consume Server-Sent Events stream chunk by chunk
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let accumulatedText = "";
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line || !line.startsWith("data:")) continue;
+        const dataStr = line.slice(5).trim();
+        if (dataStr === "[DONE]") continue;
+
+        try {
+          const parsed = JSON.parse(dataStr);
+          const delta = parsed.choices?.[0]?.delta;
+          if (delta?.content) {
+            accumulatedText += delta.content;
+          }
+        } catch {
+          // Ignore incomplete JSON stream slices
+        }
+      }
+    }
+
+    // Flush remaining buffer line
+    if (buffer.trim().startsWith("data:")) {
+      const dataStr = buffer.trim().slice(5).trim();
+      if (dataStr !== "[DONE]") {
+        try {
+          const parsed = JSON.parse(dataStr);
+          const delta = parsed.choices?.[0]?.delta;
+          if (delta?.content) {
+            accumulatedText += delta.content;
+          }
+        } catch {
+          // Ignore
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (!accumulatedText.trim()) {
     throw new Error("The provider returned no usable output. Try again or switch models.");
   }
-  const choice = json.choices[0];
-  if (choice.finish_reason === "length") throw new Error("The report reached its output-token limit. Increase Report Output Limit or disable some optional modules, then retry.");
-  if (choice.message.refusal || choice.finish_reason === "content_filter") throw new Error("The provider declined this analysis. No report was generated. Try a different provider or model.");
-  const content = choice.message.content;
-  if (typeof content !== "string" || !content.trim()) throw new Error("The provider returned an empty answer. No report was generated. Try again or choose another model.");
-  return { text: content, model: typeof json.model === "string" ? json.model : normalizeModel(cfg.model, cfg.provider) };
+
+  return accumulatedText;
 }
 
 // Google Gemini via its REST API (works directly from the browser with an API key).
@@ -175,7 +217,7 @@ async function callGemini(
   userText: string,
   images: ImagePart[],
   cfg: RunnerConfig
-): Promise<ProviderReply> {
+): Promise<string> {
   const model = normalizeModel(cfg.model, "gemini");
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
     model
@@ -188,19 +230,14 @@ async function callGemini(
 
   const res = await fetch(url, {
     method: "POST",
-    // Send the key as a header rather than in the URL so it can't end up in
-    // request logs or browser history.
     headers: { "Content-Type": "application/json", "x-goog-api-key": cfg.apiKey.trim() },
     body: JSON.stringify({
-      systemInstruction: { parts: [{ text: systemContent(endpoint, cfg) }] },
+      systemInstruction: { parts: [{ text: SYSTEM_CONTENT[endpoint] }] },
       contents: [{ role: "user", parts }],
       generationConfig: {
-        maxOutputTokens: cfg.maxOutputTokens,
+        maxOutputTokens: 8192,
         responseMimeType: "application/json",
-        // Gemini 2.5 uses token budgets; Gemini 3 uses thinking levels.
-        ...(cfg.thinkingMode && { thinkingConfig: model.startsWith("gemini-2.5-")
-          ? { thinkingBudget: Math.min(({ low: 1024, medium: 8192, high: 16384 }[cfg.reasoningEffort || "medium"] || 8192), Math.max(128, (cfg.maxOutputTokens || 32768) - 1024)) }
-          : { thinkingLevel: cfg.reasoningEffort || "medium" } }),
+        ...(cfg.thinkingMode && { thinkingConfig: { thinkingBudget: -1 } }),
       },
     }),
   });
@@ -219,39 +256,54 @@ async function callGemini(
   }
 
   const json: any = await res.json();
-  const candidate = json.candidates?.[0];
-  if (candidate?.finishReason === "MAX_TOKENS") throw new Error("The report reached its output-token limit. Increase Report Output Limit or disable some optional modules, then retry.");
-  if (json.promptFeedback?.blockReason || (candidate?.finishReason && candidate.finishReason !== "STOP")) throw new Error("Gemini did not complete this analysis. Try another model or provider.");
-  const text = (candidate?.content?.parts || [])
-    .filter((p: any) => !p.thought)
+  const text = (json.candidates?.[0]?.content?.parts || [])
     .map((p: any) => p.text || "")
     .join("");
-  if (!text.trim()) throw new Error("Gemini returned an empty answer. No report was generated. Try again or choose another model.");
-  return { text, model };
+  return text || "{}";
 }
 
-// Fetch the live model catalog from DeepSeek's OpenAI-compatible /models
-// endpoint. Powers the "Fetch model list" button in Model Settings, so the app
-// never ships a hardcoded (and inevitably stale) DeepSeek model list.
-export async function fetchDeepSeekModels(apiKey: string): Promise<string[]> {
-  if (!apiKey || !apiKey.trim()) throw new Error("Enter your DeepSeek API key first, then fetch the model list.");
-  let res: Response;
-  try {
-    res = await fetch("https://api.deepseek.com/models", {
-      headers: { Authorization: `Bearer ${apiKey.trim()}` },
-      signal: AbortSignal.timeout(15000),
-    });
-  } catch {
-    throw new Error("Could not reach DeepSeek. Check your connection and retry.");
+const asArray = (v: any): any[] => (Array.isArray(v) ? v : []);
+const asObject = (v: any): any => (v && typeof v === "object" ? v : {});
+
+function normalizeAnalysis(d: any): any {
+  const data = asObject(d);
+  data.observations = asArray(data.observations);
+  if (data.visualComparison) {
+    data.visualComparison.matches = asArray(data.visualComparison.matches);
+    data.visualComparison.mismatches = asArray(data.visualComparison.mismatches);
   }
-  if (res.status === 401) throw new Error("Authorization failed (401). Check that your DeepSeek API key is correct.");
-  if (!res.ok) throw new Error(`DeepSeek error ${res.status}. Try again in a moment.`);
-  const json: any = await res.json().catch(() => null);
-  const ids = Array.isArray(json?.data)
-    ? json.data.map((m: any) => m?.id).filter((id: any): id is string => typeof id === "string" && !!id)
-    : [];
-  if (!ids.length) throw new Error("DeepSeek returned no models. Type the model ID manually.");
-  return ids;
+  return data;
+}
+
+function normalizeResult(endpoint: EndpointType, d: any): any {
+  if (endpoint === "analyze") return normalizeAnalysis(d);
+  if (endpoint === "compare") {
+    const data = asObject(d);
+    data.original = normalizeAnalysis(data.original);
+    data.remake = normalizeAnalysis(data.remake);
+    data.comparison = asObject(data.comparison);
+    data.comparison.whatImproved = asArray(data.comparison.whatImproved);
+    data.comparison.whatRegressed = asArray(data.comparison.whatRegressed);
+    data.comparison.verdictScorecard = asObject(data.comparison.verdictScorecard);
+    return data;
+  }
+  if (endpoint === "group") {
+    const data = asObject(d);
+    data.synergyAnalysis = asObject(data.synergyAnalysis);
+    data.synergyAnalysis.redundancyWarnings = asArray(data.synergyAnalysis.redundancyWarnings);
+    data.characterBreakdowns = asArray(data.characterBreakdowns);
+    data.groupScenarios = asObject(data.groupScenarios);
+    return data;
+  }
+  const data = asObject(d);
+  data.characterAssessments = asArray(data.characterAssessments);
+  data.worldAndSystemAnalysis = asObject(data.worldAndSystemAnalysis);
+  data.worldAndSystemAnalysis.worldBuilding = asObject(data.worldAndSystemAnalysis.worldBuilding);
+  data.worldAndSystemAnalysis.systemRulesAdherence = asObject(
+    data.worldAndSystemAnalysis.systemRulesAdherence
+  );
+  data.playScenarios = asObject(data.playScenarios);
+  return data;
 }
 
 async function run(
@@ -265,49 +317,19 @@ async function run(
       "No API key set. Open the 'Model & API Key Settings' panel, choose your provider, and paste your own API key."
     );
   }
-  if (!["gemini", "openrouter", "openai", "deepseek", "custom"].includes(cfg.provider)) throw new Error("Select a supported provider.");
-  // Validate the destination before any request, including model discovery.
-  if (cfg.provider === "custom") {
-    chatCompletionsUrl(cfg.provider, cfg.customBaseUrl);
-    if (!cfg.model?.trim()) throw new Error("Enter your custom endpoint’s exact model ID.");
-  }
-  let model = normalizeModel(cfg.model, cfg.provider);
-  let maxOutputTokens = cfg.maxOutputTokens ?? (endpoint === "analyze" ? 16384 : 32768);
-  if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1024 || maxOutputTokens > 131072) throw new Error("Report Output Limit must be between 1,024 and 131,072 tokens.");
-  if (model.startsWith("~") && cfg.provider !== "openrouter") throw new Error("OpenRouter latest aliases require the OpenRouter provider.");
-  if (model.startsWith("latest:")) {
-    if (cfg.provider !== "openrouter") throw new Error("Latest model choices require the OpenRouter provider.");
-    let catalog: any;
-    try {
-      const response = await fetch("https://openrouter.ai/api/v1/models", { signal: AbortSignal.timeout(15000) });
-      if (!response.ok) throw new Error("catalog unavailable");
-      catalog = await response.json();
-    } catch {
-      throw new Error("Could not check OpenRouter’s latest models. Retry or select a pinned model; no analysis request was sent.");
-    }
-    if (!Array.isArray(catalog?.data)) throw new Error("OpenRouter returned an invalid model catalog. Choose a pinned model or retry.");
-    const resolved = selectLatestModel(model, catalog.data);
-    model = resolved.id;
-    const ceiling = resolved.top_provider?.max_completion_tokens;
-    if (typeof ceiling === "number" && ceiling > 0) maxOutputTokens = Math.min(maxOutputTokens, ceiling);
-    if (images.length && resolved.architecture?.input_modalities && !resolved.architecture.input_modalities.includes("image")) {
-      throw new Error(`${model} does not accept images. Remove the art for a text-only audit, or choose a vision-capable model.`);
-    }
-  }
-  cfg = { ...cfg, model, maxOutputTokens };
-  const reply =
+  const raw =
     cfg.provider === "gemini"
       ? await callGemini(endpoint, userText, images, cfg)
       : await callOpenAICompatible(endpoint, userText, images, cfg);
   let parsed: any;
   try {
-    parsed = safeParseJSON(reply.text);
+    parsed = safeParseJSON(raw);
   } catch {
     throw new Error(
-      "The AI returned malformed JSON. Retry, increase Report Output Limit, or disable optional modules. No grades were substituted."
+      "The AI's reply came back incomplete or malformed — usually the response got cut off. Run it again; if it keeps happening, try a shorter card or a different model."
     );
   }
-  return { ...normalizeResult(endpoint, parsed), requestModel: reply.model };
+  return normalizeResult(endpoint, parsed);
 }
 
 function analyzerNotesBlock(notes: string | null | undefined): string {
@@ -355,3 +377,4 @@ export function runMultichar(
   const userText = `MULTI-CHARACTER CARD DATA TO ANALYZE:\n\n${p.description}${analyzerNotesBlock(p.analyzerNotes)}`;
   return run("multichar", userText, [], cfg);
 }
+

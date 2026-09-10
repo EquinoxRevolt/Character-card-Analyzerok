@@ -1,12 +1,11 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import { VitePWA } from 'vite-plugin-pwa'
 
+// We are completely removing the VitePWA plugin so it stops 
+// trying to hijack the mobile browser rendering!
 export default defineConfig({
-  // CRITICAL: This must exactly match your repository name!
-  base: '/Character-card-Analyzerok/',
+  base: './',
   plugins: [
-    react(),
-    VitePWA({ registerType: 'autoUpdate' })
+    react()
   ],
 })

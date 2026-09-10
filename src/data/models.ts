@@ -53,11 +53,18 @@ export function selectLatestModel(selector: string, catalog: CatalogModel[]): Ca
 }
 
 export function migrateModel(provider: string, model: string): string {
-  const corrected = model.replace(/anthropic\/claude-(\d+(?:\.\d+)*?)-(opus|sonnet)$/, "anthropic/claude-$2-$1");
   if (provider === "gemini" && /^gemini-3\.[567]-flash$/.test(model)) return DEFAULT_GEMINI_MODEL;
-  if (provider !== "openrouter") return corrected;
+  if (provider !== "openrouter") return model.replace(/anthropic\/claude-(\d+(?:\.\d+)*?)-(opus|sonnet)$/, "anthropic/claude-$2-$1");
+  // OpenRouter's model list used to be plain capitalized strings (e.g.
+  // "Anthropic/Claude-4.6-opus") before the ~author/family-latest alias
+  // overhaul. Lowercase before matching so those old saved picks still
+  // resolve to a current entry instead of silently falling back to manual
+  // entry (matching against the case-sensitive list/patterns below would
+  // otherwise never hit, hiding the dropdown for anyone who picked a model
+  // before the overhaul shipped).
+  const corrected = model.toLowerCase().replace(/anthropic\/claude-(\d+(?:\.\d+)*?)-(opus|sonnet)$/, "anthropic/claude-$2-$1");
   if (OPENROUTER_MODELS.some(option => option.id === corrected)) return corrected;
   if (/^google\/gemini-.*flash/.test(corrected) || corrected.startsWith("google/gemma-")) return DEFAULT_OPENROUTER_MODEL;
   for (const [selector, pattern] of Object.entries(families)) if (pattern.test(corrected)) return selector;
-  return corrected; // Preserve manually entered model IDs.
+  return corrected; // Preserve manually entered model IDs (lowercased for OpenRouter).
 }

@@ -2,7 +2,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { deflateSync } from 'node:zlib';
 import { existsSync } from 'node:fs';
-import { selectLatestModel, OPENROUTER_MODELS, migrateModel } from '../src/data/models.ts';
+import { selectLatestModel, OPENROUTER_MODELS, migrateModel, DEFAULT_OPENROUTER_MODEL } from '../src/data/models.ts';
 import { readProviderSettings } from '../src/providerSettings.ts';
 import { normalizeResult } from '../src/resultValidation.ts';
 import { tryExtractCharaMetadata } from '../src/utils.ts';
@@ -76,6 +76,28 @@ test('latest resolution excludes specialized variants and compares versions nume
   assert.throws(()=>selectLatestModel('~anthropic/claude-opus-latest',entries),/no matching release/);
   assert.equal(OPENROUTER_MODELS.length,9);
   assert.equal(migrateModel('openrouter','anthropic/claude-4.6-opus'),'anthropic/claude-opus-4.6');
+});
+test('old capitalized OpenRouter model strings (pre-alias-overhaul) still migrate onto a dropdown entry',()=>{
+  // These are the literal pre-overhaul list values; a returning user's
+  // localStorage could hold any of them. Every one must resolve to a
+  // current OPENROUTER_MODELS id so the dropdown shows instead of silently
+  // falling back to manual entry.
+  const cases = {
+    'Anthropic/Claude-4.6-opus':'anthropic/claude-opus-4.6',
+    'Anthropic/Claude-4.6-sonnet':'~anthropic/claude-sonnet-latest',
+    'Anthropic/Claude-4.8-opus':'~anthropic/claude-opus-latest',
+    'Deepseek/deepseek-v4-flash':'~deepseek/deepseek-v4-flash-latest',
+    'Deepseek/deepseek-v4-pro':'latest:deepseek-pro',
+    'Google/gemma-4-31b-it':DEFAULT_OPENROUTER_MODEL,
+    'Google/Gemini-3.1-flash-lite':DEFAULT_OPENROUTER_MODEL,
+    'Google/Gemini-3.1-pro-preview':'google/gemini-3.1-pro-preview',
+    'Google/Gemini-3.5-flash':DEFAULT_OPENROUTER_MODEL,
+  };
+  for (const [legacy, expected] of Object.entries(cases)) {
+    const migrated = migrateModel('openrouter', legacy);
+    assert.equal(migrated, expected, `${legacy} -> ${migrated}, expected ${expected}`);
+    assert.ok(OPENROUTER_MODELS.some(m => m.id === migrated), `${migrated} must be a real dropdown entry`);
+  }
 });
 test('latest is resolved before generation, preserves pinned IDs, and respects output ceiling', async () => {
   const calls=[];

@@ -13,7 +13,7 @@ import { DEFAULT_GEMINI_MODEL, DEFAULT_OPENROUTER_MODEL, selectLatestModel } fro
 export type EndpointType = "analyze" | "compare" | "group" | "multichar";
 
 export interface RunnerConfig {
-  provider: string; // "gemini" | "openrouter" | "openai" | "custom"
+  provider: string; // "gemini" | "openrouter" | "openai" | "deepseek" | "custom"
   apiKey: string;
   model: string | null;
   customBaseUrl?: string | null;
@@ -43,6 +43,7 @@ function systemContent(endpoint: EndpointType, cfg: RunnerConfig): string {
 
 function providerLabel(provider: string): string {
   if (provider === "openai") return "OpenAI";
+  if (provider === "deepseek") return "DeepSeek";
   if (provider === "custom") return "the custom endpoint";
   if (provider === "gemini") return "Gemini";
   return "OpenRouter";
@@ -54,6 +55,7 @@ function normalizeModel(model: string | null | undefined, provider: string): str
   if (!model || !model.trim()) {
     if (provider === "openrouter") return DEFAULT_OPENROUTER_MODEL;
     if (provider === "openai") return "gpt-5.5";
+    if (provider === "deepseek") return "deepseek-chat";
     return DEFAULT_GEMINI_MODEL;
   }
   let m = model.trim();
@@ -64,6 +66,9 @@ function normalizeModel(model: string | null | undefined, provider: string): str
     if (m.startsWith("gemini-")) m = "google/" + m;
   } else if (provider === "gemini") {
     m = m.replace(/^google\//i, "");
+  } else if (provider === "deepseek") {
+    // Direct DeepSeek IDs have no vendor prefix, unlike OpenRouter slugs.
+    m = m.replace(/^deepseek\/(?=deepseek)/i, "");
   }
   return m;
 }
@@ -80,6 +85,7 @@ function chatCompletionsUrl(provider: string, customBaseUrl?: string | null): st
     return base.endsWith("/chat/completions") ? base : base + "/chat/completions";
   }
   if (provider === "openai") return "https://api.openai.com/v1/chat/completions";
+  if (provider === "deepseek") return "https://api.deepseek.com/chat/completions";
   return "https://openrouter.ai/api/v1/chat/completions";
 }
 
@@ -123,7 +129,10 @@ async function callOpenAICompatible(
         { role: "user", content: userContent },
       ],
       ...(cfg.provider === "openai" && { response_format: { type: "json_object" } }),
-      ...(cfg.thinkingMode && (cfg.provider === "openrouter"
+      // DeepSeek has no reasoning-effort knob (thinking is chosen by picking
+      // deepseek-reasoner as the model) and gets no response_format, which its
+      // reasoner rejects; safeParseJSON handles the plain-text reply.
+      ...(cfg.thinkingMode && cfg.provider !== "deepseek" && (cfg.provider === "openrouter"
         ? { reasoning: { effort: cfg.reasoningEffort || "medium", exclude: true } }
         : { reasoning_effort: cfg.reasoningEffort || "medium" })),
       // OpenAI's newer (reasoning) models reject the legacy `max_tokens` field
@@ -221,6 +230,30 @@ async function callGemini(
   return { text, model };
 }
 
+// Fetch the live model catalog from DeepSeek's OpenAI-compatible /models
+// endpoint. Powers the "Fetch model list" button in Model Settings, so the app
+// never ships a hardcoded (and inevitably stale) DeepSeek model list.
+export async function fetchDeepSeekModels(apiKey: string): Promise<string[]> {
+  if (!apiKey || !apiKey.trim()) throw new Error("Enter your DeepSeek API key first, then fetch the model list.");
+  let res: Response;
+  try {
+    res = await fetch("https://api.deepseek.com/models", {
+      headers: { Authorization: `Bearer ${apiKey.trim()}` },
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    throw new Error("Could not reach DeepSeek. Check your connection and retry.");
+  }
+  if (res.status === 401) throw new Error("Authorization failed (401). Check that your DeepSeek API key is correct.");
+  if (!res.ok) throw new Error(`DeepSeek error ${res.status}. Try again in a moment.`);
+  const json: any = await res.json().catch(() => null);
+  const ids = Array.isArray(json?.data)
+    ? json.data.map((m: any) => m?.id).filter((id: any): id is string => typeof id === "string" && !!id)
+    : [];
+  if (!ids.length) throw new Error("DeepSeek returned no models. Type the model ID manually.");
+  return ids;
+}
+
 async function run(
   endpoint: EndpointType,
   userText: string,
@@ -232,7 +265,7 @@ async function run(
       "No API key set. Open the 'Model & API Key Settings' panel, choose your provider, and paste your own API key."
     );
   }
-  if (!["gemini", "openrouter", "openai", "custom"].includes(cfg.provider)) throw new Error("Select a supported provider.");
+  if (!["gemini", "openrouter", "openai", "deepseek", "custom"].includes(cfg.provider)) throw new Error("Select a supported provider.");
   // Validate the destination before any request, including model discovery.
   if (cfg.provider === "custom") {
     chatCompletionsUrl(cfg.provider, cfg.customBaseUrl);

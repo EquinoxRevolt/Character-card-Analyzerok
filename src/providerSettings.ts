@@ -4,6 +4,7 @@ export const PROVIDERS = [
   { id: "gemini", label: "Google Gemini", defaultModel: DEFAULT_GEMINI_MODEL },
   { id: "openrouter", label: "OpenRouter", defaultModel: DEFAULT_OPENROUTER_MODEL },
   { id: "openai", label: "OpenAI", defaultModel: "gpt-5.5" },
+  { id: "deepseek", label: "DeepSeek", defaultModel: "deepseek-chat" },
   { id: "custom", label: "Custom", defaultModel: "" },
 ];
 

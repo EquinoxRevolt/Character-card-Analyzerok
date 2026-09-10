@@ -1,6 +1,16 @@
 import { useState } from "react";
 import { OPENROUTER_MODELS, DEFAULT_GEMINI_MODEL } from "../data/models";
 import { PROVIDERS, readProviderSettings } from "../providerSettings";
+import { fetchDeepSeekModels } from "../aiClient";
+
+function readCachedDeepSeekModels(): string[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem("loresieve_deepseek_models") || "[]");
+    return Array.isArray(raw) ? raw.filter((id): id is string => typeof id === "string" && !!id) : [];
+  } catch {
+    return [];
+  }
+}
 
 // The one shared Model & API Key settings panel, used by all three input
 // modes (single audit, comparison, group). Every value persists to
@@ -64,6 +74,28 @@ export default function ModelSettingsPanel({ s }: { s: ModelSettings }) {
   const [open, setOpen] = useState(() => localStorage.getItem("loresieve_use_custom") !== "false");
   const [isManualModel, setIsManualModel] = useState(() => s.provider === "openrouter" && !OPENROUTER_MODELS.some(m => m.id === s.model));
   const [showKey, setShowKey] = useState(false);
+  // DeepSeek's model list is fetched live from its API on request (no
+  // hardcoded list to go stale) and cached so the dropdown survives reloads.
+  const [deepseekModels, setDeepseekModels] = useState<string[]>(readCachedDeepSeekModels);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [fetchStatus, setFetchStatus] = useState("");
+
+  const handleFetchModels = async () => {
+    setFetchingModels(true);
+    setFetchStatus("");
+    try {
+      const ids = await fetchDeepSeekModels(s.apiKey);
+      setDeepseekModels(ids);
+      localStorage.setItem("loresieve_deepseek_models", JSON.stringify(ids));
+      setIsManualModel(false);
+      if (!ids.includes(s.model)) s.setModel(ids.includes("deepseek-chat") ? "deepseek-chat" : ids[0]);
+      setFetchStatus(`Fetched ${ids.length} model${ids.length === 1 ? "" : "s"} from DeepSeek.`);
+    } catch (e) {
+      setFetchStatus(e instanceof Error ? e.message : "Could not fetch the model list.");
+    } finally {
+      setFetchingModels(false);
+    }
+  };
 
   const toggleOpen = (v: boolean) => {
     setOpen(v);
@@ -73,12 +105,14 @@ export default function ModelSettingsPanel({ s }: { s: ModelSettings }) {
   const keyLabel =
     s.provider === "openrouter" ? "OpenRouter API Key"
     : s.provider === "openai" ? "OpenAI API Key"
+    : s.provider === "deepseek" ? "DeepSeek API Key"
     : s.provider === "custom" ? "API Key"
     : "Gemini API Key";
 
   const keyPlaceholder =
     s.provider === "openrouter" ? "sk-or-v1-..."
     : s.provider === "openai" ? "sk-proj-..."
+    : s.provider === "deepseek" ? "sk-..."
     : s.provider === "custom" ? "sk-..."
     : "AIzaSy...";
 
@@ -157,7 +191,7 @@ export default function ModelSettingsPanel({ s }: { s: ModelSettings }) {
               ) : (
                 <>
                   Your key is saved on this device and sent directly to{" "}
-                  {s.provider === "openrouter" ? "OpenRouter" : s.provider === "openai" ? "OpenAI" : "Google"}; it never
+                  {s.provider === "openrouter" ? "OpenRouter" : s.provider === "openai" ? "OpenAI" : s.provider === "deepseek" ? "DeepSeek" : "Google"}; it never
                   passes through any server of ours. Get credentials at{" "}
                   <a
                     href={
@@ -165,13 +199,15 @@ export default function ModelSettingsPanel({ s }: { s: ModelSettings }) {
                         ? "https://openrouter.ai/keys"
                         : s.provider === "openai"
                         ? "https://platform.openai.com/api-keys"
+                        : s.provider === "deepseek"
+                        ? "https://platform.deepseek.com/api_keys"
                         : "https://aistudio.google.com/"
                     }
                     target="_blank"
                     rel="noreferrer noopener"
                     className="text-[#00F0FF] hover:underline"
                   >
-                    {s.provider === "openrouter" ? "OpenRouter" : s.provider === "openai" ? "OpenAI Platform" : "Google AI Studio"}
+                    {s.provider === "openrouter" ? "OpenRouter" : s.provider === "openai" ? "OpenAI Platform" : s.provider === "deepseek" ? "DeepSeek Platform" : "Google AI Studio"}
                   </a>.
                 </>
               )}
@@ -258,6 +294,65 @@ export default function ModelSettingsPanel({ s }: { s: ModelSettings }) {
               )}
               <span className="text-[9px] leading-snug text-zinc-500 font-mono block">
                 Latest choices follow new releases automatically. DeepSeek Pro uses a live catalog lookup; the others use OpenRouter aliases. Pinned versions stay fixed.
+              </span>
+            </div>
+          ) : s.provider === "deepseek" ? (
+            <div className="space-y-1.5 animate-fadeIn">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <label className="block text-[10px] font-mono font-bold tracking-wider text-[#555] uppercase">
+                  Active LLM Model String
+                </label>
+                {deepseekModels.length > 0 && (
+                  <label className="flex items-center gap-1.5 text-[9px] font-mono text-zinc-400 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={isManualModel}
+                      onChange={(e) => setIsManualModel(e.target.checked)}
+                      className="rounded border-[#1A1A1A] bg-[#0A0A0A] text-[#00F0FF] focus:ring-[#00F0FF]/30"
+                    />
+                    ENTER MANUALLY
+                  </label>
+                )}
+              </div>
+
+              {isManualModel || !deepseekModels.includes(s.model) ? (
+                <input
+                  type="text"
+                  value={s.model}
+                  onChange={(e) => s.setModel(e.target.value)}
+                  placeholder="e.g. deepseek-chat"
+                  className="w-full bg-[#0A0A0A] border border-[#1A1A1A] rounded p-2 text-xs font-mono text-[#00F0FF] placeholder-zinc-700 focus:outline-none focus:border-[#00F0FF]/60"
+                />
+              ) : (
+                <div className="relative">
+                  <select
+                    value={s.model}
+                    onChange={(e) => s.setModel(e.target.value)}
+                    className="w-full bg-[#0A0A0A] border border-[#1A1A1A] rounded p-2 text-xs font-mono text-zinc-200 appearance-none focus:outline-none focus:border-[#00F0FF]/60 cursor-pointer"
+                  >
+                    {deepseekModels.map((id) => (
+                      <option key={id} value={id}>{id}</option>
+                    ))}
+                  </select>
+                  <div className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-zinc-500 font-mono text-xs">
+                    ▼
+                  </div>
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={handleFetchModels}
+                disabled={fetchingModels}
+                className="w-full py-1.5 px-2 rounded text-[10px] font-mono font-bold tracking-wider uppercase border transition-colors bg-[#050505] border-[#1A1A1A] text-zinc-400 hover:text-[#00F0FF] hover:border-[#00F0FF]/40 hover:bg-[#0A0A0A] disabled:opacity-50 disabled:cursor-wait"
+              >
+                {fetchingModels ? "Fetching model list…" : "⟳ Fetch model list"}
+              </button>
+              {fetchStatus && (
+                <span className="text-[9px] leading-snug text-zinc-400 font-mono block">{fetchStatus}</span>
+              )}
+              <span className="text-[9px] leading-snug text-zinc-500 font-mono block">
+                Fetch pulls the live model list from DeepSeek using your API key. deepseek-chat answers directly; deepseek-reasoner thinks before answering.
               </span>
             </div>
           ) : (

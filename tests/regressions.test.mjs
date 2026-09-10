@@ -6,7 +6,7 @@ import { selectLatestModel, OPENROUTER_MODELS, migrateModel } from '../src/data/
 import { readProviderSettings } from '../src/providerSettings.ts';
 import { normalizeResult } from '../src/resultValidation.ts';
 import { tryExtractCharaMetadata } from '../src/utils.ts';
-import { runAnalyze, runCompare, runGroup, runMultichar } from '../src/aiClient.ts';
+import { runAnalyze, runCompare, runGroup, runMultichar, fetchDeepSeekModels } from '../src/aiClient.ts';
 import { buildPrompt } from '../src/systemInstructions.ts';
 
 const originalFetch = globalThis.fetch;
@@ -166,6 +166,38 @@ test('OpenRouter receives reasoning settings and the chosen report limit',async(
   assert.deepEqual(body.reasoning,{effort:'high',exclude:true});
   assert.equal(body.max_tokens,65536);
   assert.equal(body.reasoning_effort,undefined);
+});
+test('DeepSeek direct provider posts to api.deepseek.com without OpenAI-only or reasoning params',async()=>{
+  const calls=[];
+  globalThis.fetch=async(url,options)=>{calls.push({url,options});return chat(JSON.stringify(good()));};
+  const result=await runAnalyze(params,{...cfg,provider:'deepseek',model:'',thinkingMode:true,reasoningEffort:'high',maxOutputTokens:8192});
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].url,'https://api.deepseek.com/chat/completions');
+  assert.equal(calls[0].options.headers.Authorization,'Bearer FAKE_TEST_KEY');
+  const body=JSON.parse(calls[0].options.body);
+  assert.equal(body.model,'deepseek-chat');
+  assert.equal(body.response_format,undefined);
+  assert.equal(body.reasoning,undefined);
+  assert.equal(body.reasoning_effort,undefined);
+  assert.equal(body.max_tokens,8192);
+  assert.equal(result.requestModel,'deepseek-chat');
+  await runAnalyze(params,{...cfg,provider:'deepseek',model:'deepseek/deepseek-reasoner'});
+  assert.equal(JSON.parse(calls[1].options.body).model,'deepseek-reasoner');
+});
+test('DeepSeek model fetch lists IDs and fails cleanly',async()=>{
+  globalThis.fetch=async(url,options)=>{
+    assert.equal(url,'https://api.deepseek.com/models');
+    assert.equal(options.headers.Authorization,'Bearer FAKE_TEST_KEY');
+    return {ok:true,status:200,json:async()=>({object:'list',data:[{id:'deepseek-chat'},{id:'deepseek-reasoner'},{bogus:true}]})};
+  };
+  assert.deepEqual(await fetchDeepSeekModels('FAKE_TEST_KEY'),['deepseek-chat','deepseek-reasoner']);
+  await assert.rejects(fetchDeepSeekModels('  '),/API key/);
+  globalThis.fetch=async()=>({ok:false,status:401,json:async()=>({})});
+  await assert.rejects(fetchDeepSeekModels('FAKE_TEST_KEY'),/401/);
+  globalThis.fetch=async()=>({ok:true,status:200,json:async()=>({data:[]})});
+  await assert.rejects(fetchDeepSeekModels('FAKE_TEST_KEY'),/no models/);
+  globalThis.fetch=async()=>{throw new Error('Offline');};
+  await assert.rejects(fetchDeepSeekModels('FAKE_TEST_KEY'),/Could not reach DeepSeek/);
 });
 test('Gemini 2.5 thinking budget leaves space for the report at a smaller output limit',async()=>{
   let config;

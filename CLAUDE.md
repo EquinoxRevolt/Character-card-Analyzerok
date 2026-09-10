@@ -33,10 +33,11 @@ Note `CardInput` is reused for both `audit` and `multichar` modes — in multich
 
 `aiClient.ts` **is the former server**, ported into the browser. `runAnalyze/runCompare/runGroup/runMultichar` build the user-message text, then `run()` dispatches to either:
 - `callGemini()` — Google's REST `generateContent` (key sent via `x-goog-api-key` header), or
-- `callOpenAICompatible()` — OpenRouter / OpenAI / any custom `/chat/completions` endpoint.
+- `callOpenAICompatible()` — OpenRouter / OpenAI / DeepSeek (direct) / any custom `/chat/completions` endpoint.
 
 Provider-specific quirks live **only** here and must stay there:
 - **OpenAI** requires `max_completion_tokens` (not `max_tokens`, which its reasoning models reject) and takes `response_format: json_object`.
+- **DeepSeek** (direct, `api.deepseek.com`) gets no `response_format` (its reasoner rejects it) and no reasoning-effort field — thinking is chosen by picking `deepseek-reasoner` as the model. There is no hardcoded DeepSeek model list: `fetchDeepSeekModels()` (also in `aiClient.ts`) powers the "Fetch model list" button in Model Settings, and results cache in `localStorage` under `loresieve_deepseek_models`.
 - **OpenRouter** model slugs are lowercase + case-sensitive; `normalizeModel()` lowercases them.
 - Every raw response goes through `safeParseJSON()` (strips markdown fences, extracts the first `{…}`/`[…]`) then `normalizeResult()` in `src/resultValidation.ts`, which validates required grades and rendered field types before a view receives them. Missing required grades, empty answers, refusals, and truncation are errors; never invent fallback grades. When adding a field a view reads directly (e.g. `data.x.y.score`), add a matching guard in `normalizeResult()`.
 

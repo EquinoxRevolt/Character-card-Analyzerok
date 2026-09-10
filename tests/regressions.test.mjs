@@ -47,6 +47,17 @@ test('token-efficient grading sends a much smaller prompt with the same schema, 
   await runAnalyze(params, {...cfg, efficientGrading: true});
   assert.ok(body.messages[0].content.length < fullLength * 0.7);
 });
+test('both rubrics refuse credit for species-default ear/tail behavior', () => {
+  // Every LLM plays ears/tails as mood displays unprompted, so a card that
+  // states the obvious mapping must not be praised for it. Full and
+  // efficient must carry the same standard.
+  for (const endpoint of ['analyze','compare','group','multichar']) for (const efficient of [false, true]) {
+    const prompt = buildPrompt(endpoint, [], efficient);
+    for (const marker of [/Species-default BEHAVIOR/, /prehensile/, /Judge the override, never the appendage/, /species-default display/]) {
+      assert.match(prompt, marker, `${endpoint} efficient=${efficient}`);
+    }
+  }
+});
 test('Boring Tuesday and Piss Them Off module shapes validate', () => {
   const result = normalizeResult('analyze', {...good(), boringTuesday:{inconvenience:'Rain on laundry day',beat:'Shrugs, moves the line inside.'}, pissThemOff:{trivial:'a',personal:'b',denied:'Not established.'}});
   assert.equal(result.pissThemOff.denied, 'Not established.');

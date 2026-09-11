@@ -1,30 +1,25 @@
 // Self-contained, browser-side AI client with streaming SSE support.
-import * as sys from "./systemInstructions";
+import { buildPrompt } from "./systemInstructions";
 import { safeParseJSON } from "./utils";
 
 export type EndpointType = "analyze" | "compare" | "group" | "multichar";
 
 export interface RunnerConfig {
-  provider: string; // "gemini" | "openrouter" | "openai" | "custom"
+  provider: string; 
   apiKey: string;
   model: string | null;
   customBaseUrl?: string | null;
   thinkingMode?: boolean;
   reasoningEffort?: string;
+  modules?: any[];
+  maxOutputTokens?: number;
+  efficientGrading?: boolean;
 }
 
 interface ImagePart {
   mimeType: string;
   base64: string;
 }
-
-const anySys = sys as any;
-const SYSTEM_CONTENT: Record<EndpointType, string> = {
-  analyze: (anySys.analyzeSystemInstruction || "") + (anySys.analyzeSchemaPrompt || ""),
-  compare: (anySys.compareSystemInstruction || "") + (anySys.compareSchemaPrompt || ""),
-  group: (anySys.groupSystemInstruction || "") + (anySys.groupSchemaPrompt || ""),
-  multichar: (anySys.multicharSystemInstruction || "") + (anySys.multicharSchemaPrompt || ""),
-};
 
 function providerLabel(provider: string): string {
   if (provider === "openai") return "OpenAI";
@@ -64,7 +59,8 @@ async function callOpenAICompatible(
   endpoint: EndpointType,
   userText: string,
   images: ImagePart[],
-  cfg: RunnerConfig
+  cfg: RunnerConfig,
+  systemContent: string
 ): Promise<string> {
   const url = chatCompletionsUrl(cfg.provider, cfg.customBaseUrl);
 
@@ -94,29 +90,25 @@ async function callOpenAICompatible(
     body: JSON.stringify({
       model: normalizeModel(cfg.model, cfg.provider),
       messages: [
-        { role: "system", content: SYSTEM_CONTENT[endpoint] },
+        { role: "system", content: systemContent },
         { role: "user", content: userContent },
       ],
       stream: true,
       ...(cfg.provider === "openai" && { response_format: { type: "json_object" } }),
       ...(cfg.thinkingMode && { reasoning_effort: cfg.reasoningEffort || "medium" }),
       ...(cfg.provider === "openai"
-        ? { max_completion_tokens: 16384 }
-        : { max_tokens: 8192 }),
+        ? { max_completion_tokens: cfg.maxOutputTokens || 16384 }
+        : { max_tokens: cfg.maxOutputTokens || 8192 }),
     }),
   });
 
   if (!res.ok) {
     const errText = await res.text().catch(() => res.statusText);
     if (res.status === 429) {
-      throw new Error(
-        "Rate limit reached (429). The provider is busy or your quota is used up. Wait a bit or switch models."
-      );
+      throw new Error("Rate limit reached (429). The provider is busy or your quota is used up.");
     }
     if (res.status === 401) {
-      throw new Error(
-        `Authorization failed (401). Check that your ${providerLabel(cfg.provider)} API key is correct.`
-      );
+      throw new Error(`Authorization failed (401). Check your ${providerLabel(cfg.provider)} API key.`);
     }
     throw new Error(`${providerLabel(cfg.provider)} error ${res.status}: ${errText}`);
   }
@@ -125,7 +117,7 @@ async function callOpenAICompatible(
   if (!res.body || (!contentType.includes("text/event-stream") && contentType.includes("application/json"))) {
     const json: any = await res.json();
     if (!json.choices?.[0]?.message) {
-      throw new Error("The provider returned no usable output. Try again or switch models.");
+      throw new Error("The provider returned no usable output.");
     }
     return json.choices[0].message.content || "{}";
   }
@@ -156,8 +148,7 @@ async function callOpenAICompatible(
           if (delta?.content) {
             accumulatedText += delta.content;
           }
-        } catch {
-        }
+        } catch {}
       }
     }
     if (buffer.trim().startsWith("data:")) {
@@ -176,10 +167,7 @@ async function callOpenAICompatible(
     reader.releaseLock();
   }
 
-  if (!accumulatedText.trim()) {
-    throw new Error("The provider returned no usable output. Try again or switch models.");
-  }
-
+  if (!accumulatedText.trim()) throw new Error("The provider returned no usable output.");
   return accumulatedText;
 }
 
@@ -187,7 +175,8 @@ async function callGemini(
   endpoint: EndpointType,
   userText: string,
   images: ImagePart[],
-  cfg: RunnerConfig
+  cfg: RunnerConfig,
+  systemContent: string
 ): Promise<string> {
   const model = normalizeModel(cfg.model, "gemini");
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
@@ -203,10 +192,10 @@ async function callGemini(
     method: "POST",
     headers: { "Content-Type": "application/json", "x-goog-api-key": cfg.apiKey.trim() },
     body: JSON.stringify({
-      systemInstruction: { parts: [{ text: SYSTEM_CONTENT[endpoint] }] },
+      systemInstruction: { parts: [{ text: systemContent }] },
       contents: [{ role: "user", parts }],
       generationConfig: {
-        maxOutputTokens: 8192,
+        maxOutputTokens: cfg.maxOutputTokens || 8192,
         responseMimeType: "application/json",
         ...(cfg.thinkingMode && { thinkingConfig: { thinkingBudget: -1 } }),
       },
@@ -215,13 +204,9 @@ async function callGemini(
 
   if (!res.ok) {
     const errText = await res.text().catch(() => res.statusText);
-    if (res.status === 429) {
-      throw new Error(
-        "Rate limit reached (429). Gemini is busy or your free quota is used up. Wait a bit or switch models."
-      );
-    }
+    if (res.status === 429) throw new Error("Rate limit reached (429). Gemini is busy.");
     if ((res.status === 400 || res.status === 403) && /api[_ ]?key/i.test(errText)) {
-      throw new Error("Gemini rejected the API key. Double-check your Gemini API key.");
+      throw new Error("Gemini rejected the API key.");
     }
     throw new Error(`Gemini error ${res.status}: ${errText}`);
   }
@@ -284,42 +269,37 @@ async function run(
   cfg: RunnerConfig
 ): Promise<any> {
   if (!cfg.apiKey || !cfg.apiKey.trim()) {
-    throw new Error(
-      "No API key set. Open the 'Model & API Key Settings' panel, choose your provider, and paste your own API key."
-    );
+    throw new Error("No API key set. Open Model Settings and paste your key.");
   }
+  
+  // Generating the actual system prompt rules so the AI doesn't return blank text
+  const systemContent = buildPrompt(endpoint, cfg.modules || [], cfg.efficientGrading || false);
+
   const raw =
     cfg.provider === "gemini"
-      ? await callGemini(endpoint, userText, images, cfg)
-      : await callOpenAICompatible(endpoint, userText, images, cfg);
+      ? await callGemini(endpoint, userText, images, cfg, systemContent)
+      : await callOpenAICompatible(endpoint, userText, images, cfg, systemContent);
+  
   let parsed: any;
   try {
     parsed = safeParseJSON(raw);
   } catch {
-    throw new Error(
-      "The AI's reply came back incomplete or malformed — usually the response got cut off. Run it again; if it keeps happening, try a shorter card or a different model."
-    );
+    throw new Error("The AI's reply came back incomplete or malformed.");
   }
   return normalizeResult(endpoint, parsed);
 }
 
 function analyzerNotesBlock(notes: string | null | undefined): string {
   if (!notes || !notes.trim()) return "";
-  return `\n[OOC/ANALYZER NOTES - EXTERNAL CONTEXT FOR YOU, THE AUDITOR]\nCRITICAL INSTRUCTION: The user has provided the following external context. You MUST take this into account when evaluating the card and DO NOT penalize choices that are explicitly justified by these notes:\n"""\n${notes}\n"""`;
+  return `\n[OOC/ANALYZER NOTES]\nCRITICAL INSTRUCTION: The user provided external context. DO NOT penalize choices justified by these notes:\n"""\n${notes}\n"""`;
 }
 
 export function runAnalyze(
-  p: {
-    description: string;
-    imageBase64: string | null;
-    imageMimeType: string | null;
-    analyzerNotes: string | null;
-  },
+  p: { description: string; imageBase64: string | null; imageMimeType: string | null; analyzerNotes: string | null },
   cfg: RunnerConfig
 ): Promise<any> {
-  const userText = `Analyze the following character card/description instructions intended for an LLM runtime.\n\nCHARACTER DESCRIPTION / INSTRUCTIONS:\n"""\n${p.description}\n"""${analyzerNotesBlock(p.analyzerNotes)}`;
-  const images: ImagePart[] =
-    p.imageBase64 && p.imageMimeType ? [{ mimeType: p.imageMimeType, base64: p.imageBase64 }] : [];
+  const userText = `Analyze the following character card instructions.\n\nCHARACTER DESCRIPTION:\n"""\n${p.description}\n"""${analyzerNotesBlock(p.analyzerNotes)}`;
+  const images: ImagePart[] = p.imageBase64 && p.imageMimeType ? [{ mimeType: p.imageMimeType, base64: p.imageBase64 }] : [];
   return run("analyze", userText, images, cfg);
 }
 
@@ -327,7 +307,7 @@ export function runCompare(
   p: { originalDescription: string; remakeDescription: string },
   cfg: RunnerConfig
 ): Promise<any> {
-  const userText = `Compare original vs remake character designs.\n\nORIGINAL CHARACTER DESCRIPTION:\n"""\n${p.originalDescription}\n"""\n\nREMAKE CHARACTER DESCRIPTION:\n"""\n${p.remakeDescription}\n"""`;
+  const userText = `ORIGINAL:\n"""\n${p.originalDescription}\n"""\n\nREMAKE:\n"""\n${p.remakeDescription}\n"""`;
   return run("compare", userText, [], cfg);
 }
 
@@ -335,9 +315,7 @@ export function runGroup(
   p: { characters: Array<{ name: string; description: string }> },
   cfg: RunnerConfig
 ): Promise<any> {
-  const userText = p.characters
-    .map((c, i) => `CHAR_${i + 1} (${c.name}):\n${c.description}`)
-    .join("\n\n------\n\n");
+  const userText = p.characters.map((c, i) => `CHAR_${i + 1} (${c.name}):\n${c.description}`).join("\n\n------\n\n");
   return run("group", userText, [], cfg);
 }
 
@@ -345,11 +323,10 @@ export function runMultichar(
   p: { description: string; analyzerNotes?: string | null },
   cfg: RunnerConfig
 ): Promise<any> {
-  const userText = `MULTI-CHARACTER CARD DATA TO ANALYZE:\n\n${p.description}${analyzerNotesBlock(p.analyzerNotes)}`;
+  const userText = `MULTI-CHARACTER CARD DATA:\n\n${p.description}${analyzerNotesBlock(p.analyzerNotes)}`;
   return run("multichar", userText, [], cfg);
 }
 
-// Stub required by ModelSettings.tsx in the updated repository version
 export async function fetchDeepSeekModels(): Promise<string[]> {
   return [];
 }

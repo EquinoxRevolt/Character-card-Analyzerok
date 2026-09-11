@@ -2,7 +2,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
 export default defineConfig({
-  // The absolute path prevents the CSS folder confusion forever!
+  // This MUST perfectly match the uppercase/lowercase letters in your URL.
   base: '/Character-card-Analyzerok/',
   plugins: [
     react()
